@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --app-scale: 1;
+  --app-font-size: 14px;
+}
+
+html {
+  font-size: var(--app-font-size);
+}
+
+body {
+  transform: scale(var(--app-scale));
+  transform-origin: top left;
+}
+
+/* Apply scaling to specific components that need it */
+.scale-with-app {
+  transform: scale(var(--app-scale));
+  transform-origin: top left;
+} 

@@ -1,0 +1,5 @@
+src-tauri/target/debug/libchat_lib.rlib filter=lfs diff=lfs merge=lfs -text
+src-tauri/target/debug/libchat_lib.a filter=lfs diff=lfs merge=lfs -text
+src-tauri/target/debug/deps/libchat_lib.rlib filter=lfs diff=lfs merge=lfs -text
+src-tauri/target/debug/deps/libchat_lib.a filter=lfs diff=lfs merge=lfs -text
+src-tauri/target/debug/deps/libobjc2_app_kit-61fbd2265a79ead0.rlib filter=lfs diff=lfs merge=lfs -text
