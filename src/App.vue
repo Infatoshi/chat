@@ -132,12 +132,13 @@ const handleSettingsChange = (newSettings: any) => {
   };
 };
 
+let controller: AbortController | null = null;
+
 async function sendMessage(message: string) {
   if (!currentConversationId.value) {
     createConversation(getSystemMessage(), selectedModel.value?.id || '');
   }
 
-  // Add user message to chat and conversation
   const userMessage: Message = {
     role: "user",
     content: message
@@ -147,7 +148,14 @@ async function sendMessage(message: string) {
   
   isLoading.value = true;
 
+  // Initialize a new controller for this request
+  controller = new AbortController();
+  let signal = controller.signal;
+
+  console.log('Starting new API request with fresh AbortController');
+
   try {
+    console.log('Sending request to OpenRouter API...');
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -162,7 +170,8 @@ async function sendMessage(message: string) {
         "stream": true,
         "temperature": modelSettings.value.temperature,
         "max_tokens": modelSettings.value.maxTokens
-      })
+      }),
+      signal
     });
 
     if (!response.ok) {
@@ -176,58 +185,116 @@ async function sendMessage(message: string) {
       throw new Error("Response body is null");
     }
 
-    // Start streaming
+    console.log('Starting stream processing...');
     chatWindowRef.value?.startStreaming();
     
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullContent = "";
+    let wasAborted = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      // Decode the chunk and split into lines
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
-
-      // Process each line
-      for (const line of lines) {
-        if (line.trim() === '') continue;
-        if (line.includes('[DONE]')) continue;
-
+    try {
+      while (true) {
         try {
-          // Remove 'data: ' prefix and parse JSON
-          const data = JSON.parse(line.replace(/^data: /, ''));
-          if (data.choices?.[0]?.delta?.content) {
-            const token = data.choices[0].delta.content;
-            fullContent += token;
-            chatWindowRef.value?.appendToken(token);
+          const { done, value } = await reader.read();
+          if (done) {
+            console.log('Stream completed naturally');
+            break;
           }
-        } catch (e) {
-          console.warn('Error parsing streaming response line:', e);
+
+          // Check if we've been aborted
+          if (signal.aborted) {
+            console.log('Stream aborted during read');
+            wasAborted = true;
+            await reader.cancel();
+            break;
+          }
+
+          // Process the chunk
+          const chunk = decoder.decode(value);
+          console.log('Received chunk:', chunk);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.trim() === '') continue;
+            if (line.includes('[DONE]')) {
+              console.log('Received [DONE] signal from API');
+              continue;
+            }
+
+            try {
+              const data = JSON.parse(line.replace(/^data: /, ''));
+              if (data.choices?.[0]?.delta?.content) {
+                const token = data.choices[0].delta.content;
+                fullContent += token;
+                chatWindowRef.value?.appendToken(token);
+              }
+            } catch (e) {
+              console.warn('Error parsing streaming response line:', e);
+            }
+          }
+        } catch (error: any) {
+          if (error?.name === 'AbortError') {
+            console.log('Caught abort error during read');
+            wasAborted = true;
+            break;
+          }
+          throw error;
         }
       }
+    } finally {
+      console.log('Stream reading completed or aborted');
     }
 
-    // End streaming and add the complete message
-    chatWindowRef.value?.endStreaming();
-    const assistantMessage: Message = {
-      role: "assistant",
-      content: fullContent
-    };
-    messages.value.push(assistantMessage);
-    updateConversation(currentConversationId.value!, assistantMessage);
-  } catch (error) {
-    console.error('Error:', error);
-    const errorMessage: Message = {
-      role: "system",
-      content: "Sorry, there was an error processing your request."
-    };
-    messages.value.push(errorMessage);
-    updateConversation(currentConversationId.value!, errorMessage);
+    // Handle the completion or abortion
+    if (wasAborted) {
+      console.log('Handling aborted stream completion');
+      const partialMessage: Message = {
+        role: "assistant",
+        content: fullContent + "\n[Message generation stopped by user]"
+      };
+      messages.value.push(partialMessage);
+      updateConversation(currentConversationId.value!, partialMessage);
+    } else {
+      console.log('Handling successful stream completion');
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: fullContent
+      };
+      messages.value.push(assistantMessage);
+      updateConversation(currentConversationId.value!, assistantMessage);
+    }
+
+  } catch (error: any) {
+    console.log('Caught error in main try-catch:', error?.name || 'Unknown error');
+    if (error?.name === 'AbortError') {
+      console.log('Handling abort error in main catch block');
+      // We don't need to do anything here as it's handled in the inner try-catch
+    } else {
+      console.error('Error during streaming:', error);
+      const errorMessage: Message = {
+        role: "system",
+        content: "Sorry, there was an error processing your request."
+      };
+      messages.value.push(errorMessage);
+      updateConversation(currentConversationId.value!, errorMessage);
+    }
   } finally {
+    chatWindowRef.value?.endStreaming();
     isLoading.value = false;
+    console.log('Request completed or aborted, cleaning up');
+  }
+}
+
+// Add handler for stopping the stream
+function handleStopStream() {
+  console.log('App: Received stop stream request');
+  if (controller) {
+    console.log('App: Aborting fetch request with AbortController');
+    controller.abort();
+    console.log('App: Abort signal sent');
+  } else {
+    console.log('App: No active controller to abort');
   }
 }
 
@@ -392,6 +459,153 @@ function handlePromptSelect(prompt: { id: string; name: string; content: string 
   }
 }
 
+// Add handler for editing messages
+async function handleEditMessage(index: number, newContent: string) {
+  // Update the message content
+  messages.value[index].content = newContent;
+  
+  // Get all messages up to and including the edited message
+  const messagesToResend = messages.value.slice(0, index + 1);
+  
+  // Clear all messages after the edited message
+  messages.value = messagesToResend;
+  
+  // Update the conversation
+  if (currentConversationId.value) {
+    updateConversation(currentConversationId.value, messages.value[index]);
+  }
+  
+  // Instead of calling sendMessage, we'll directly make the API request
+  isLoading.value = true;
+
+  // Initialize a new controller for this request
+  controller = new AbortController();
+  let signal = controller.signal;
+
+  try {
+    console.log('Sending edited message to OpenRouter API...');
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${import.meta.env.VITE_OPENROUTER_API_KEY}`,
+        "HTTP-Referer": import.meta.env.VITE_SITE_URL,
+        "X-Title": import.meta.env.VITE_SITE_NAME,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        "model": selectedModel.value?.id || '',
+        "messages": messages.value,
+        "stream": true,
+        "temperature": modelSettings.value.temperature,
+        "max_tokens": modelSettings.value.maxTokens
+      }),
+      signal
+    });
+
+    if (!response.ok) {
+      throw new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+      });
+    }
+
+    if (!response.body) {
+      throw new Error("Response body is null");
+    }
+
+    console.log('Starting stream processing...');
+    chatWindowRef.value?.startStreaming();
+    
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = "";
+    let wasAborted = false;
+
+    try {
+      while (true) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            console.log('Stream completed naturally');
+            break;
+          }
+
+          if (signal.aborted) {
+            console.log('Stream aborted during read');
+            wasAborted = true;
+            await reader.cancel();
+            break;
+          }
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.trim() === '') continue;
+            if (line.includes('[DONE]')) continue;
+
+            try {
+              const data = JSON.parse(line.replace(/^data: /, ''));
+              if (data.choices?.[0]?.delta?.content) {
+                const token = data.choices[0].delta.content;
+                fullContent += token;
+                chatWindowRef.value?.appendToken(token);
+              }
+            } catch (e) {
+              console.warn('Error parsing streaming response line:', e);
+            }
+          }
+        } catch (error: any) {
+          if (error?.name === 'AbortError') {
+            console.log('Caught abort error during read');
+            wasAborted = true;
+            break;
+          }
+          throw error;
+        }
+      }
+    } finally {
+      console.log('Stream reading completed or aborted');
+    }
+
+    if (wasAborted) {
+      console.log('Handling aborted stream completion');
+      const partialMessage: Message = {
+        role: "assistant",
+        content: fullContent + "\n[Message generation stopped by user]"
+      };
+      messages.value.push(partialMessage);
+      updateConversation(currentConversationId.value!, partialMessage);
+    } else {
+      console.log('Handling successful stream completion');
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: fullContent
+      };
+      messages.value.push(assistantMessage);
+      updateConversation(currentConversationId.value!, assistantMessage);
+    }
+
+  } catch (error: any) {
+    console.log('Caught error in main try-catch:', error?.name || 'Unknown error');
+    if (error?.name === 'AbortError') {
+      console.log('Handling abort error in main catch block');
+    } else {
+      console.error('Error during streaming:', error);
+      const errorMessage: Message = {
+        role: "system",
+        content: "Sorry, there was an error processing your request."
+      };
+      messages.value.push(errorMessage);
+      updateConversation(currentConversationId.value!, errorMessage);
+    }
+  } finally {
+    chatWindowRef.value?.endStreaming();
+    isLoading.value = false;
+    console.log('Request completed or aborted, cleaning up');
+  }
+}
+
 // Update onMounted to handle keyboard shortcuts
 onMounted(async () => {
   // Load existing conversations
@@ -538,6 +752,8 @@ onMounted(async () => {
             :selected-model="selectedModel"
             :get-model-display-name="getModelDisplayName"
             @send-message="sendMessage"
+            @stop-stream="handleStopStream"
+            @edit-message="handleEditMessage"
           />
         </ErrorBoundary>
       </main>

@@ -14,18 +14,18 @@ run:
 ## Now
 - option to display thinking models with a "thinking" bool option in models.json
 - stop streaming tokens button
-- center the output response like grok.com (crammed rn)
 - copy button for code blocks
 
 ## Soon
-- edit option for any prompt
 - parallel chats (move between with cmd + [ and cmd + ])
 
 ## Later
-
+- RAG memory feature
 
 
 ## DONE
+- center the output response like grok.com (crammed rn)
+- edit option for any prompt
 - handle 
     - **
     - *
